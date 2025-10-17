@@ -1,15 +1,14 @@
-// server.js or index.js
-import express from "express";
-import mongoose from "mongoose";
-import dotenv from "dotenv";
-import cookieParser from "cookie-parser";
-import cors from "cors";
-import adminRoutes from "./routes/admin.routes.js";
+const express = require("express");
+const mongoose = require("mongoose");
+const dotenv = require("dotenv");
+const cookieParser = require("cookie-parser");
+const cors = require("cors");
 
-import authRoutes from "./routes/auth.routes.js";
-import attendanceRoutes from "./routes/attendance.routes.js";
-import adminAttendanceRoutes from "./routes/attendance.routes.js";
-import employeeRoutes from "./routes/employee.routes.js";
+const adminRoutes = require("./routes/admin.routes.js");
+const authRoutes = require("./routes/auth.routes.js");
+const attendanceRoutes = require("./routes/attendance.routes.js");
+const adminAttendanceRoutes = require("./routes/attendance.routes.js");
+const employeeRoutes = require("./routes/employee.routes.js");
 
 dotenv.config();
 const app = express();

@@ -1,7 +1,6 @@
-// middleware/validators.js
-import { body, validationResult } from "express-validator";
+const { body, validationResult } = require("express-validator");
 
-export const validateEmployeeCreation = [
+const validateEmployeeCreation = [
   body("fullName").notEmpty().withMessage("Full name is required"),
   body("email").isEmail().withMessage("Valid email is required"),
   body("password").isLength({ min: 6 }).withMessage("Password min length 6"),
@@ -20,3 +19,5 @@ export const validateEmployeeCreation = [
     next();
   }
 ];
+
+module.exports = { validateEmployeeCreation };

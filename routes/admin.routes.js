@@ -1,18 +1,18 @@
-// routes/admin.routes.js
-import express from "express";
-import {
+const express = require("express");
+const {
   getAllEmployees,
   updateEmployeeDetails,
-} from "../controllers/admin.controller.js";
-import { verifyToken, verifyAdmin } from "../middleware/auth.js";
-import {
+} = require("../controllers/admin.controller");
+const { verifyToken, verifyAdmin } = require("../middleware/auth");
+const {
   getAttendanceByDate,
   getEmployeeHistory,
   editPunchTimes,
   getAttendanceByMonth,
-} from "../controllers/attendance.controller.js";
+} = require("../controllers/attendance.controller");
 
 const router = express.Router();
+
 router.get("/employees", verifyToken, verifyAdmin, getAllEmployees);
 
 // GET /api/admin/attendance?date=YYYY-MM-DD
@@ -48,4 +48,4 @@ router.get(
   getAttendanceByMonth
 );
 
-export default router;
+module.exports = router;

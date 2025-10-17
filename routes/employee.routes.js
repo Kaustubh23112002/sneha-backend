@@ -1,10 +1,9 @@
-// routes/employee.routes.js
-import express from "express";
-import { verifyToken, verifyEmployee } from "../middleware/auth.js";
-import { getMyProfile } from "../controllers/employee.controller.js";
+const express = require("express");
+const { verifyToken, verifyEmployee } = require("../middleware/auth");
+const { getMyProfile } = require("../controllers/employee.controller");
 
 const router = express.Router();
 
 router.get("/me", verifyToken, verifyEmployee, getMyProfile);
 
-export default router;
+module.exports = router;

@@ -1,5 +1,4 @@
-// models/Attendance.js
-import mongoose from "mongoose";
+const mongoose = require("mongoose");
 
 const punchSchema = new mongoose.Schema({
   inTime: String,
@@ -11,7 +10,6 @@ const punchSchema = new mongoose.Schema({
   durationInMinutes: { type: Number }, // ➕ add this
 }, { _id: false });
 
-
 const attendanceSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   date: { type: String, required: true }, // "YYYY-MM-DD"
@@ -19,4 +17,5 @@ const attendanceSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const Attendance = mongoose.model("Attendance", attendanceSchema);
-export default Attendance;
+
+module.exports = Attendance;

@@ -1,8 +1,7 @@
-// middleware/auth.js
-import jwt from "jsonwebtoken";
-import User from "../models/User.js";
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
 
-export const verifyToken = (req, res, next) => {
+const verifyToken = (req, res, next) => {
   try {
     const token = req.cookies.token || req.headers["authorization"]?.split(" ")[1];
     if (!token) return res.status(401).json({ message: "Auth token missing" });
@@ -16,7 +15,7 @@ export const verifyToken = (req, res, next) => {
   }
 };
 
-export const verifyAdmin = (req, res, next) => {
+const verifyAdmin = (req, res, next) => {
   if (!req.user) return res.status(401).json({ message: "Not authenticated" });
   if (req.user.role !== "admin") {
     return res.status(403).json({ message: "Admin access only" });
@@ -24,10 +23,16 @@ export const verifyAdmin = (req, res, next) => {
   next();
 };
 
-export const verifyEmployee = (req, res, next) => {
+const verifyEmployee = (req, res, next) => {
   if (!req.user) return res.status(401).json({ message: "Not authenticated" });
   if (req.user.role !== "employee") {
     return res.status(403).json({ message: "Employee access only" });
   }
   next();
+};
+
+module.exports = {
+  verifyToken,
+  verifyAdmin,
+  verifyEmployee,
 };

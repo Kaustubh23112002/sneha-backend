@@ -1,13 +1,12 @@
-import User from "../models/User.js";
-import Attendance from "../models/Attendance.js";
+const User = require("../models/User");
+const Attendance = require("../models/Attendance");
 
-export const getAllEmployees = async (req, res) => {
+const getAllEmployees = async (req, res) => {
   try {
     const employees = await User.find({ role: "employee" }).select(
       "fullName email phoneNumber address shiftTimings"
     );
-    // Optionally, join attendance summary
-    // For each employee, fetch attendance records or last login / last punch etc.
+
     const result = await Promise.all(
       employees.map(async (emp) => {
         const attendance = await Attendance.find({ user: emp._id });
@@ -17,6 +16,7 @@ export const getAllEmployees = async (req, res) => {
         };
       })
     );
+
     res.status(200).json({ employees: result });
   } catch (err) {
     console.error("getAllEmployees error:", err);
@@ -24,8 +24,7 @@ export const getAllEmployees = async (req, res) => {
   }
 };
 
-
-export const updateEmployeeDetails = async (req, res) => {
+const updateEmployeeDetails = async (req, res) => {
   try {
     const { userId } = req.params;
     const { fullName, email, phoneNumber, address, salary, shiftTimings } = req.body;
@@ -49,4 +48,9 @@ export const updateEmployeeDetails = async (req, res) => {
     console.error("updateEmployeeDetails error:", err);
     res.status(500).json({ message: "Server error" });
   }
+};
+
+module.exports = {
+  getAllEmployees,
+  updateEmployeeDetails,
 };

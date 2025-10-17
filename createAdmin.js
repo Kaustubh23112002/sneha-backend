@@ -6,7 +6,10 @@ dotenv.config();
 
 const createAdmin = async () => {
   try {
-    await mongoose.connect(process.env.MONGO_URL);
+    await mongoose.connect(process.env.MONGO_URL, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
 
     // Delete existing admin to avoid conflict
     await User.deleteOne({ email: "admin@gmail.com" });
@@ -14,7 +17,7 @@ const createAdmin = async () => {
     const admin = new User({
       fullName: "Admin User",
       email: "admin@gmail.com",
-      password: "admin123", // ✅ plain text, let model hash it
+      password: "admin123",
       phoneNumber: "9999999999",
       address: "Admin Office",
       salary: "0",
@@ -25,7 +28,8 @@ const createAdmin = async () => {
     await admin.save();
 
     console.log("✅ Admin created: email=admin@gmail.com password=admin123");
-    process.exit();
+    await mongoose.disconnect();
+    process.exit(0);
   } catch (err) {
     console.error("Error creating admin:", err);
     process.exit(1);

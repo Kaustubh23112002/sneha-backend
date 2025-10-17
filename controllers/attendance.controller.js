@@ -1,17 +1,15 @@
-// controllers/attendance.controller.js
-import Attendance from "../models/Attendance.js";
-import User from "../models/User.js";
-import moment from "moment";
+const Attendance = require("../models/Attendance");
+const User = require("../models/User");
+const moment = require("moment");
 
 /**
  * Helper: choose shift based on current time or fallback
  */
 function getMatchingShift(user, timeNow) {
-  // Just return the first shift for now (you can add logic to match time if needed)
   return user.shiftTimings?.[0] || null;
 }
 
-export const punchIn = async (req, res) => {
+const punchIn = async (req, res) => {
   const userId = req.user.id;
   const file = req.file;
   if (!file) return res.status(400).json({ message: "Photo is required" });
@@ -22,11 +20,8 @@ export const punchIn = async (req, res) => {
 
     const today = moment().format("YYYY-MM-DD");
     const timeNow = moment();
-
     const shift = getMatchingShift(user, timeNow);
-    if (!shift) {
-      return res.status(400).json({ message: "No shift defined" });
-    }
+    if (!shift) return res.status(400).json({ message: "No shift defined" });
 
     let attendance = await Attendance.findOne({ user: userId, date: today });
     if (!attendance) {
@@ -35,13 +30,11 @@ export const punchIn = async (req, res) => {
 
     const lastPunch = attendance.punches[attendance.punches.length - 1];
     if (lastPunch && !lastPunch.outTime) {
-      return res
-        .status(400)
-        .json({ message: "Already punched in, please punch out first" });
+      return res.status(400).json({ message: "Already punched in, please punch out first" });
     }
 
     const scheduledStart = moment(shift.start, "HH:mm");
-    const late = timeNow.isAfter(scheduledStart); // late only if after scheduled start
+    const late = timeNow.isAfter(scheduledStart);
 
     attendance.punches.push({
       inTime: timeNow.format("HH:mm"),
@@ -57,7 +50,7 @@ export const punchIn = async (req, res) => {
   }
 };
 
-export const punchOut = async (req, res) => {
+const punchOut = async (req, res) => {
   const userId = req.user.id;
   const file = req.file;
   if (!file) return res.status(400).json({ message: "Photo is required" });
@@ -68,15 +61,11 @@ export const punchOut = async (req, res) => {
 
     const today = moment().format("YYYY-MM-DD");
     const timeNow = moment();
-
     const shift = getMatchingShift(user, timeNow);
-    if (!shift) {
-      return res.status(400).json({ message: "No shift defined" });
-    }
+    if (!shift) return res.status(400).json({ message: "No shift defined" });
 
     const attendance = await Attendance.findOne({ user: userId, date: today });
-    if (!attendance)
-      return res.status(400).json({ message: "No punch in found for today" });
+    if (!attendance) return res.status(400).json({ message: "No punch in found for today" });
 
     const lastPunch = attendance.punches[attendance.punches.length - 1];
     if (!lastPunch || lastPunch.outTime) {
@@ -86,18 +75,15 @@ export const punchOut = async (req, res) => {
     lastPunch.outTime = timeNow.format("HH:mm");
     lastPunch.outPhotoUrl = file.path;
 
-    // Calculate duration in minutes
     const inMoment = moment(lastPunch.inTime, "HH:mm");
     const outMoment = moment(lastPunch.outTime, "HH:mm");
     let duration = outMoment.diff(inMoment, "minutes");
-    if (duration < 0) duration = 0; // avoid negatives
+    if (duration < 0) duration = 0;
 
     lastPunch.durationInMinutes = duration;
 
     const scheduledEnd = moment(shift.end, "HH:mm");
-    const overtime = timeNow.isAfter(scheduledEnd); // overtime if after shift end
-
-    lastPunch.overtime = overtime;
+    lastPunch.overtime = timeNow.isAfter(scheduledEnd);
 
     await attendance.save();
     res.status(200).json({ message: "Punched out", attendance });
@@ -107,11 +93,10 @@ export const punchOut = async (req, res) => {
   }
 };
 
-export const getAttendance = async (req, res) => {
+const getAttendance = async (req, res) => {
   const userId = req.params.userId || req.user.id;
   try {
-    const records = await Attendance.find({ user: userId })
-      .populate("user", "fullName email phoneNumber address salary shiftTimings");
+    const records = await Attendance.find({ user: userId }).populate("user", "fullName email phoneNumber address salary shiftTimings");
 
     const enhanced = records.map((att) => {
       let totalMin = 0;
@@ -139,22 +124,13 @@ export const getAttendance = async (req, res) => {
   }
 };
 
-
-/**
- * Admin: get attendance records for a given date (or today)
- */
-export const getAttendanceByDate = async (req, res) => {
+const getAttendanceByDate = async (req, res) => {
   try {
-    const date = req.query.date || new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
-    const records = await Attendance.find({ date }).populate(
-      "user",
-      "fullName email phoneNumber address salary shiftTimings"
-    );
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const records = await Attendance.find({ date }).populate("user", "fullName email phoneNumber address salary shiftTimings");
 
     const enhanced = records.map((att) => {
       let totalMin = 0;
-
-      // Enhance punches with calculated duration
       const enhancedPunches = att.punches.map((punch) => {
         let duration = punch.durationInMinutes;
 
@@ -188,16 +164,10 @@ export const getAttendanceByDate = async (req, res) => {
   }
 };
 
-/**
- * Admin: get full history for a particular employee
- */
-export const getEmployeeHistory = async (req, res) => {
+const getEmployeeHistory = async (req, res) => {
   try {
     const { userId } = req.params;
-    const records = await Attendance.find({ user: userId }).populate(
-      "user",
-      "fullName email phoneNumber address salary shiftTimings"
-    );
+    const records = await Attendance.find({ user: userId }).populate("user", "fullName email phoneNumber address salary shiftTimings");
     res.status(200).json({ userId, history: records });
   } catch (err) {
     console.error("getEmployeeHistory error:", err);
@@ -205,10 +175,7 @@ export const getEmployeeHistory = async (req, res) => {
   }
 };
 
-/**
- * Admin: edit a punch’s inTime and/or outTime
- */
-export const editPunchTimes = async (req, res) => {
+const editPunchTimes = async (req, res) => {
   try {
     const { attendanceId } = req.params;
     const { punchIndex, inTime, outTime } = req.body;
@@ -223,8 +190,6 @@ export const editPunchTimes = async (req, res) => {
       return res.status(400).json({ message: "Invalid punch index" });
     }
 
-    console.log(`Editing punch #${punchIndex} on attendance ${attendanceId}`);
-
     if (inTime !== undefined && inTime !== "") punch.inTime = inTime;
     if (outTime !== undefined && outTime !== "") punch.outTime = outTime;
 
@@ -236,7 +201,7 @@ export const editPunchTimes = async (req, res) => {
   }
 };
 
-export const getAttendanceByMonth = async (req, res) => {
+const getAttendanceByMonth = async (req, res) => {
   try {
     const { userId } = req.params;
     const { month } = req.query;
@@ -250,18 +215,13 @@ export const getAttendanceByMonth = async (req, res) => {
       date: { $regex: `^${month}` },
     })
       .sort({ date: 1 })
-      .populate(
-        "user",
-        "fullName email phoneNumber address salary shiftTimings"
-      );
+      .populate("user", "fullName email phoneNumber address salary shiftTimings");
 
     if (!records.length) {
       return res.status(404).json({ message: "No attendance records found" });
     }
 
-    // Assuming user is the same for all records, get from first record
     const user = records[0].user;
-
     let totalMinAll = 0;
 
     const enhanced = records.map((att) => {
@@ -298,4 +258,14 @@ export const getAttendanceByMonth = async (req, res) => {
     console.error("getAttendanceByMonth error:", err);
     res.status(500).json({ message: "Server error" });
   }
+};
+
+module.exports = {
+  punchIn,
+  punchOut,
+  getAttendance,
+  getAttendanceByDate,
+  getEmployeeHistory,
+  editPunchTimes,
+  getAttendanceByMonth,
 };
