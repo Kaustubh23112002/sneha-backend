@@ -40,11 +40,11 @@ export const punchIn = async (req, res) => {
         .json({ message: "Already punched in, please punch out first" });
     }
 
-    const scheduledStart = moment(shift.start, "hh:mm A");
+    const scheduledStart = moment(shift.start, "HH:mm");
     const late = timeNow.isAfter(scheduledStart); // late only if after scheduled start
 
     attendance.punches.push({
-      inTime: timeNow.format("hh:mm A"),
+      inTime: timeNow.format("HH:mm"),
       inPhotoUrl: file.path,
       late,
     });
@@ -84,18 +84,18 @@ export const punchOut = async (req, res) => {
       return res.status(400).json({ message: "No open punch to close" });
     }
 
-    lastPunch.outTime = timeNow.format("hh:mm A");
+    lastPunch.outTime = timeNow.format("HH:mm");
     lastPunch.outPhotoUrl = file.path;
 
     // Calculate duration in minutes
-    const inMoment = moment(lastPunch.inTime, "hh:mm A");
-    const outMoment = moment(lastPunch.outTime, "hh:mm A");
+    const inMoment = moment(lastPunch.inTime, "HH:mm");
+    const outMoment = moment(lastPunch.outTime, "HH:mm");
     let duration = outMoment.diff(inMoment, "minutes");
     if (duration < 0) duration = 0; // avoid negatives
 
     lastPunch.durationInMinutes = duration;
 
-    const scheduledEnd = moment(shift.end, "hh:mm A");
+    const scheduledEnd = moment(shift.end, "HH:mm");
     const overtime = timeNow.isAfter(scheduledEnd); // overtime if after shift end
 
     lastPunch.overtime = overtime;
@@ -120,8 +120,8 @@ export const getAttendance = async (req, res) => {
         if (p.durationInMinutes != null) {
           totalMin += p.durationInMinutes;
         } else if (p.inTime && p.outTime) {
-          const inM = moment(p.inTime, "hh:mm A");
-          const outM = moment(p.outTime, "hh:mm A");
+          const inM = moment(p.inTime, "HH:mm");
+          const outM = moment(p.outTime, "HH:mm");
           const diff = outM.diff(inM, "minutes");
           totalMin += diff > 0 ? diff : 0;
         }
@@ -160,8 +160,8 @@ export const getAttendanceByDate = async (req, res) => {
         let duration = punch.durationInMinutes;
 
         if (duration == null && punch.inTime && punch.outTime) {
-          const inM = moment(punch.inTime, "hh:mm A");
-          const outM = moment(punch.outTime, "hh:mm A");
+          const inM = moment(punch.inTime, "HH:mm");
+          const outM = moment(punch.outTime, "HH:mm");
           duration = outM.diff(inM, "minutes");
           if (duration < 0) duration = 0;
         }
@@ -271,8 +271,8 @@ export const getAttendanceByMonth = async (req, res) => {
         if (p.durationInMinutes != null) {
           dayMin += p.durationInMinutes;
         } else if (p.inTime && p.outTime) {
-          const inM = moment(p.inTime, "hh:mm A");
-          const outM = moment(p.outTime, "hh:mm A");
+          const inM = moment(p.inTime, "HH:mm");
+          const outM = moment(p.outTime, "HH:mm");
           const diff = outM.diff(inM, "minutes");
           dayMin += diff > 0 ? diff : 0;
         }

@@ -3,6 +3,7 @@ import express from "express";
 import {
   getAllEmployees,
   updateEmployeeDetails,
+  deleteEmployee,
 } from "../controllers/admin.controller.js";
 import { verifyToken, verifyAdmin } from "../middleware/auth.js";
 import {
@@ -14,6 +15,9 @@ import {
 
 const router = express.Router();
 router.get("/employees", verifyToken, verifyAdmin, getAllEmployees);
+
+// DELETE /api/admin/employees/:userId
+router.delete("/employees/:userId", verifyToken, verifyAdmin, deleteEmployee);
 
 // GET /api/admin/attendance?date=YYYY-MM-DD
 router.get("/attendance", verifyToken, verifyAdmin, getAttendanceByDate);

@@ -50,3 +50,25 @@ export const updateEmployeeDetails = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+
+export const deleteEmployee = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // First, delete attendance records
+    await Attendance.deleteMany({ user: userId });
+
+    // Then, delete the user
+    const result = await User.findByIdAndDelete(userId);
+
+    if (!result) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+
+    res.status(200).json({ message: "Employee and attendance deleted successfully" });
+  } catch (err) {
+    console.error("deleteEmployee error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
