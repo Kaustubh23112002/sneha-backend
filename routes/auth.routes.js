@@ -3,6 +3,7 @@ import express from "express";
 import { login, createEmployee } from "../controllers/auth.controller.js";
 import { verifyToken, verifyAdmin } from "../middleware/auth.js";
 import { validateEmployeeCreation } from "../middleware/validators.js";
+import User from "../models/User.js"; // ✅ add this at the top
 
 const router = express.Router();
 
