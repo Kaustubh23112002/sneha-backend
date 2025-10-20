@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken";
 
 export const login = async (req, res) => {
   const { email, password } = req.body;
-  console.log("🔐 Login Attempt:", { email, password });
+  // console.log("🔐 Login Attempt:", { email, password });
   try {
     const user = await User.findOne({ email });
     if (!user) {
@@ -12,7 +12,7 @@ export const login = async (req, res) => {
       return res.status(404).json({ message: "User not found" });}
 
       console.log("✅ User found:", user.email);
-    console.log("Stored hashed password:", user.password);
+    // console.log("Stored hashed password:", user.password);
 
     const isMatch = await user.comparePassword(password);
      console.log("🔍 Password match result:", isMatch);
