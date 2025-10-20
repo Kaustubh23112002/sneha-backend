@@ -18,3 +18,5 @@ Thumbs.db
 
 # Optional
 package-lock.json
+
+createAdmin.js
