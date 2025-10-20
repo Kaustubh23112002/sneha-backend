@@ -21,7 +21,7 @@ export const punchIn = async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     const today = moment().format("YYYY-MM-DD");
-    const timeNow = moment();
+    const timeNow = moment.utc().add(5, 'hours').add(30, 'minutes');
 
     const shift = getMatchingShift(user, timeNow);
     if (!shift) {
@@ -67,7 +67,8 @@ export const punchOut = async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     const today = moment().format("YYYY-MM-DD");
-    const timeNow = moment();
+    const timeNow = moment.utc().add(5, 'hours').add(30, 'minutes');
+
 
     const shift = getMatchingShift(user, timeNow);
     if (!shift) {
