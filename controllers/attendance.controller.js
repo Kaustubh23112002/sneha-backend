@@ -2,13 +2,28 @@
 import Attendance from "../models/Attendance.js";
 import User from "../models/User.js";
 import moment from "moment";
-import { LATE_THRESHOLD_MIN, OVERTIME_THRESHOLD_MIN, getShiftBoundaryMoments } from "../utils/attendanceTime.js";
 
+// Thresholds
+const LATE_THRESHOLD_MIN = 15;
+const OVERTIME_THRESHOLD_MIN = 30;
+
+// Build shift start/end with date and handle overnight end < start
+function getShiftBoundaryMoments(dateStr, shift) {
+  const start = moment(`${dateStr} ${shift.start}`, "YYYY-MM-DD HH:mm");
+  let end = moment(`${dateStr} ${shift.end}`, "YYYY-MM-DD HH:mm");
+  if (end.isBefore(start)) end.add(1, "day");
+  return { start, end };
+}
+
+/**
+ * Helper: choose shift based on current time or fallback
+ */
 function getMatchingShift(user, timeNow) {
+  // Just return the first shift for now (you can add logic to match time if needed)
   return user.shiftTimings?.[0] || null;
 }
 
-// PUNCH IN: set late mark/minutes
+// PUNCH IN with late computation (>=15 min)
 export const punchIn = async (req, res) => {
   const userId = req.user.id;
   const file = req.file;
@@ -18,29 +33,40 @@ export const punchIn = async (req, res) => {
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const today = moment().format("YYYY-MM-DD");
-    const timeNow = moment();
+    // Use IST for "now"
+    const timeNow = moment.utc().add(5, "hours").add(30, "minutes");
+    const today = timeNow.clone().format("YYYY-MM-DD");
 
     const shift = getMatchingShift(user, timeNow);
-    if (!shift) return res.status(400).json({ message: "No shift defined" });
+    if (!shift) {
+      return res.status(400).json({ message: "No shift defined" });
+    }
 
     let attendance = await Attendance.findOne({ user: userId, date: today });
-    if (!attendance) attendance = new Attendance({ user: userId, date: today, punches: [] });
+    if (!attendance) {
+      attendance = new Attendance({ user: userId, date: today, punches: [] });
+    }
 
     const lastPunch = attendance.punches[attendance.punches.length - 1];
     if (lastPunch && !lastPunch.outTime) {
-      return res.status(400).json({ message: "Already punched in, please punch out first" });
+      return res
+        .status(400)
+        .json({ message: "Already punched in, please punch out first" });
     }
 
+    // Compute late minutes against scheduled start for today
     const { start: scheduledStart } = getShiftBoundaryMoments(today, shift);
     const lateMinutes = Math.max(0, timeNow.diff(scheduledStart, "minutes"));
     const lateMark = lateMinutes >= LATE_THRESHOLD_MIN;
 
+    // Keep existing 'late' field for compatibility, add minutes as computed field
     attendance.punches.push({
       inTime: timeNow.format("HH:mm"),
       inPhotoUrl: file.path,
-      lateMark,
+      late: lateMark,
+      // extra computed fields (not persisted if schema is strict, but included in response)
       lateMinutes,
+      lateMark,
     });
 
     await attendance.save();
@@ -51,7 +77,7 @@ export const punchIn = async (req, res) => {
   }
 };
 
-// PUNCH OUT: set overtime mark/minutes + duration
+// PUNCH OUT with overtime computation (>30 min)
 export const punchOut = async (req, res) => {
   const userId = req.user.id;
   const file = req.file;
@@ -61,14 +87,18 @@ export const punchOut = async (req, res) => {
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const today = moment().format("YYYY-MM-DD");
-    const timeNow = moment();
+    // Use IST for "now"
+    const timeNow = moment.utc().add(5, "hours").add(30, "minutes");
+    const today = timeNow.clone().format("YYYY-MM-DD");
 
     const shift = getMatchingShift(user, timeNow);
-    if (!shift) return res.status(400).json({ message: "No shift defined" });
+    if (!shift) {
+      return res.status(400).json({ message: "No shift defined" });
+    }
 
     const attendance = await Attendance.findOne({ user: userId, date: today });
-    if (!attendance) return res.status(400).json({ message: "No punch in found for today" });
+    if (!attendance)
+      return res.status(400).json({ message: "No punch in found for today" });
 
     const lastPunch = attendance.punches[attendance.punches.length - 1];
     if (!lastPunch || lastPunch.outTime) {
@@ -78,18 +108,23 @@ export const punchOut = async (req, res) => {
     lastPunch.outTime = timeNow.format("HH:mm");
     lastPunch.outPhotoUrl = file.path;
 
+    // Calculate duration in minutes
     const inMoment = moment(lastPunch.inTime, "HH:mm");
     const outMoment = moment(lastPunch.outTime, "HH:mm");
     let duration = outMoment.diff(inMoment, "minutes");
-    if (duration < 0) duration = 0;
+    if (duration < 0) duration = 0; // avoid negatives
     lastPunch.durationInMinutes = duration;
 
+    // Compute overtime minutes against scheduled end for today (handle overnight)
     const { end: scheduledEnd } = getShiftBoundaryMoments(today, shift);
     const overtimeMinutes = Math.max(0, timeNow.diff(scheduledEnd, "minutes"));
-    const overtimeMark = overtimeMinutes >= OVERTIME_THRESHOLD_MIN;
+    const overtimeMark = overtimeMinutes > OVERTIME_THRESHOLD_MIN;
 
-    lastPunch.overtimeMark = overtimeMark;
+    // Keep existing 'overtime' field for compatibility, add minutes as computed field
+    lastPunch.overtime = overtimeMark;
+    // extra computed fields (not persisted if schema is strict, but included in response)
     lastPunch.overtimeMinutes = overtimeMinutes;
+    lastPunch.overtimeMark = overtimeMark;
 
     await attendance.save();
     res.status(200).json({ message: "Punched out", attendance });
@@ -99,19 +134,27 @@ export const punchOut = async (req, res) => {
   }
 };
 
-// GET per-user: include totalLate/totalOvertime
+// GET per-user: include total late/OT minutes and hours per day
 export const getAttendance = async (req, res) => {
   const userId = req.params.userId || req.user.id;
   try {
-    const records = await Attendance.find({ user: userId })
-      .populate("user", "fullName email phoneNumber address salary shiftTimings");
+    const records = await Attendance.find({ user: userId }).populate(
+      "user",
+      "fullName email phoneNumber address salary shiftTimings"
+    );
 
     const enhanced = records.map((att) => {
       let totalMin = 0;
       let lateMin = 0;
       let overtimeMin = 0;
 
+      const shift = att.user?.shiftTimings?.[0] || null;
+      const { start: sStart, end: sEnd } = shift
+        ? getShiftBoundaryMoments(att.date, shift)
+        : { start: null, end: null };
+
       att.punches.forEach((p, idx) => {
+        // Worked minutes
         if (p.durationInMinutes != null) {
           totalMin += Math.max(0, p.durationInMinutes);
         } else if (p.inTime && p.outTime) {
@@ -120,8 +163,26 @@ export const getAttendance = async (req, res) => {
           const diff = outM.diff(inM, "minutes");
           totalMin += diff > 0 ? diff : 0;
         }
-        if (idx === 0 && p.lateMinutes != null) lateMin += Math.max(0, p.lateMinutes);
-        if (p.overtimeMinutes != null) overtimeMin += Math.max(0, p.overtimeMinutes);
+
+        // Late minutes (first punch)
+        if (idx === 0) {
+          let lm =
+            p.lateMinutes != null
+              ? p.lateMinutes
+              : sStart && p.inTime
+              ? Math.max(0, moment(p.inTime, "HH:mm").diff(sStart, "minutes"))
+              : 0;
+          lateMin += Math.max(0, lm);
+        }
+
+        // Overtime minutes (all punches)
+        let om =
+          p.overtimeMinutes != null
+            ? p.overtimeMinutes
+            : sEnd && p.outTime
+            ? Math.max(0, moment(p.outTime, "HH:mm").diff(sEnd, "minutes"))
+            : 0;
+        overtimeMin += Math.max(0, om);
       });
 
       return {
@@ -142,10 +203,12 @@ export const getAttendance = async (req, res) => {
   }
 };
 
-// GET by date: include totals + per-punch computed duration
+/**
+ * Admin: get attendance records for a given date (or today)
+ */
 export const getAttendanceByDate = async (req, res) => {
   try {
-    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const date = req.query.date || new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
     const records = await Attendance.find({ date }).populate(
       "user",
       "fullName email phoneNumber address salary shiftTimings"
@@ -156,9 +219,15 @@ export const getAttendanceByDate = async (req, res) => {
       let lateMin = 0;
       let overtimeMin = 0;
 
-      const enhancedPunches = att.punches.map((punch, idx) => {
-        let duration = punch.durationInMinutes;
+      const shift = att.user?.shiftTimings?.[0] || null;
+      const { start: sStart, end: sEnd } = shift
+        ? getShiftBoundaryMoments(att.date, shift)
+        : { start: null, end: null };
 
+      // Enhance punches with calculated duration and late/OT minutes
+      const enhancedPunches = att.punches.map((punch, idx) => {
+        // duration
+        let duration = punch.durationInMinutes;
         if (duration == null && punch.inTime && punch.outTime) {
           const inM = moment(punch.inTime, "HH:mm");
           const outM = moment(punch.outTime, "HH:mm");
@@ -167,12 +236,34 @@ export const getAttendanceByDate = async (req, res) => {
         }
         if (duration != null) totalMin += duration;
 
-        if (idx === 0 && punch.lateMinutes != null) lateMin += Math.max(0, punch.lateMinutes);
-        if (punch.overtimeMinutes != null) overtimeMin += Math.max(0, punch.overtimeMinutes);
+        // late minutes (first punch only)
+        let lateMinutes =
+          punch.lateMinutes != null
+            ? punch.lateMinutes
+            : sStart && punch.inTime
+            ? Math.max(0, moment(punch.inTime, "HH:mm").diff(sStart, "minutes"))
+            : 0;
+        const lateMark = lateMinutes >= LATE_THRESHOLD_MIN;
+        if (idx === 0) lateMin += Math.max(0, lateMinutes);
+
+        // overtime minutes (each punch)
+        let overtimeMinutes =
+          punch.overtimeMinutes != null
+            ? punch.overtimeMinutes
+            : sEnd && punch.outTime
+            ? Math.max(0, moment(punch.outTime, "HH:mm").diff(sEnd, "minutes"))
+            : 0;
+        const overtimeMark = overtimeMinutes > OVERTIME_THRESHOLD_MIN;
+        overtimeMin += Math.max(0, overtimeMinutes);
 
         return {
           ...punch.toObject(),
           durationInMinutes: duration ?? 0,
+          // expose computed flags + minutes in API response
+          lateMark,
+          lateMinutes,
+          overtimeMark,
+          overtimeMinutes,
         };
       });
 
@@ -195,22 +286,78 @@ export const getAttendanceByDate = async (req, res) => {
   }
 };
 
-// Monthly with late/OT rollups
+/**
+ * Admin: get full history for a particular employee
+ */
+export const getEmployeeHistory = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const records = await Attendance.find({ user: userId }).populate(
+      "user",
+      "fullName email phoneNumber address salary shiftTimings"
+    );
+    res.status(200).json({ userId, history: records });
+  } catch (err) {
+    console.error("getEmployeeHistory error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+/**
+ * Admin: edit a punch’s inTime and/or outTime
+ * Note: keeps persisted booleans (late/overtime) as-is; recomputation is handled in getters.
+ */
+export const editPunchTimes = async (req, res) => {
+  try {
+    const { attendanceId } = req.params;
+    const { punchIndex, inTime, outTime } = req.body;
+
+    const attendance = await Attendance.findById(attendanceId);
+    if (!attendance) {
+      return res.status(404).json({ message: "Attendance record not found" });
+    }
+
+    const punch = attendance.punches[punchIndex];
+    if (!punch) {
+      return res.status(400).json({ message: "Invalid punch index" });
+    }
+
+    if (inTime !== undefined && inTime !== "") punch.inTime = inTime;
+    if (outTime !== undefined && outTime !== "") punch.outTime = outTime;
+
+    await attendance.save();
+    res.status(200).json({ message: "Punch updated", attendance });
+  } catch (err) {
+    console.error("editPunchTimes error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// Monthly: include day totals and monthly rollups for late/OT
 export const getAttendanceByMonth = async (req, res) => {
   try {
     const { userId } = req.params;
     const { month } = req.query;
-    if (!month) return res.status(400).json({ message: "Month is required, format YYYY-MM" });
+
+    if (!month) {
+      return res.status(400).json({ message: "Month is required, format YYYY-MM" });
+    }
 
     const records = await Attendance.find({
       user: userId,
       date: { $regex: `^${month}` },
     })
       .sort({ date: 1 })
-      .populate("user", "fullName email phoneNumber address salary shiftTimings");
+      .populate(
+        "user",
+        "fullName email phoneNumber address salary shiftTimings"
+      );
 
-    if (!records.length) return res.status(404).json({ message: "No attendance records found" });
+    if (!records.length) {
+      return res.status(404).json({ message: "No attendance records found" });
+    }
 
+    // Assuming user is the same for all records, get from first record
     const user = records[0].user;
 
     let totalMinAll = 0;
@@ -222,7 +369,13 @@ export const getAttendanceByMonth = async (req, res) => {
       let dayLate = 0;
       let dayOT = 0;
 
+      const shift = att.user?.shiftTimings?.[0] || null;
+      const { start: sStart, end: sEnd } = shift
+        ? getShiftBoundaryMoments(att.date, shift)
+        : { start: null, end: null };
+
       att.punches.forEach((p, idx) => {
+        // worked minutes
         if (p.durationInMinutes != null) {
           dayMin += Math.max(0, p.durationInMinutes);
         } else if (p.inTime && p.outTime) {
@@ -231,8 +384,26 @@ export const getAttendanceByMonth = async (req, res) => {
           const diff = outM.diff(inM, "minutes");
           dayMin += diff > 0 ? diff : 0;
         }
-        if (idx === 0 && p.lateMinutes != null) dayLate += Math.max(0, p.lateMinutes);
-        if (p.overtimeMinutes != null) dayOT += Math.max(0, p.overtimeMinutes);
+
+        // late (first punch)
+        if (idx === 0) {
+          const lm =
+            p.lateMinutes != null
+              ? p.lateMinutes
+              : sStart && p.inTime
+              ? Math.max(0, moment(p.inTime, "HH:mm").diff(sStart, "minutes"))
+              : 0;
+          dayLate += Math.max(0, lm);
+        }
+
+        // overtime (sum across punches)
+        const om =
+          p.overtimeMinutes != null
+            ? p.overtimeMinutes
+            : sEnd && p.outTime
+            ? Math.max(0, moment(p.outTime, "HH:mm").diff(sEnd, "minutes"))
+            : 0;
+        dayOT += Math.max(0, om);
       });
 
       totalMinAll += dayMin;
@@ -266,68 +437,6 @@ export const getAttendanceByMonth = async (req, res) => {
     });
   } catch (err) {
     console.error("getAttendanceByMonth error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-};
-
-// Admin edit: recompute duration/late/OT after time changes (optional enhancement)
-export const editPunchTimes = async (req, res) => {
-  try {
-    const { attendanceId } = req.params;
-    const { punchIndex, inTime, outTime } = req.body;
-
-    const attendance = await Attendance.findById(attendanceId).populate("user", "shiftTimings");
-    if (!attendance) return res.status(404).json({ message: "Attendance record not found" });
-
-    const punch = attendance.punches[punchIndex];
-    if (!punch) return res.status(400).json({ message: "Invalid punch index" });
-
-    if (inTime !== undefined && inTime !== "") punch.inTime = inTime;
-    if (outTime !== undefined && outTime !== "") punch.outTime = outTime;
-
-    const shift = attendance.user?.shiftTimings?.[0];
-    if (shift) {
-      const { start: sStart, end: sEnd } = getShiftBoundaryMoments(attendance.date, shift);
-      if (punch.inTime) {
-        const inM = moment(punch.inTime, "HH:mm");
-        punch.lateMinutes = Math.max(0, inM.diff(sStart, "minutes"));
-        punch.lateMark = punch.lateMinutes >= LATE_THRESHOLD_MIN;
-      }
-      if (punch.inTime && punch.outTime) {
-        const inM = moment(punch.inTime, "HH:mm");
-        const outM = moment(punch.outTime, "HH:mm");
-        let duration = outM.diff(inM, "minutes");
-        if (duration < 0) duration = 0;
-        punch.durationInMinutes = duration;
-
-        punch.overtimeMinutes = Math.max(0, outM.diff(sEnd, "minutes"));
-        punch.overtimeMark = punch.overtimeMinutes >= OVERTIME_THRESHOLD_MIN;
-      }
-    }
-
-    await attendance.save();
-    res.status(200).json({ message: "Punch updated", attendance });
-  } catch (err) {
-    console.error("editPunchTimes error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-};
-
-
-
-/**
- * Admin: get full history for a particular employee
- */
-export const getEmployeeHistory = async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const records = await Attendance.find({ user: userId }).populate(
-      "user",
-      "fullName email phoneNumber address salary shiftTimings"
-    );
-    res.status(200).json({ userId, history: records });
-  } catch (err) {
-    console.error("getEmployeeHistory error:", err);
     res.status(500).json({ message: "Server error" });
   }
 };
