@@ -15,6 +15,21 @@ function getShiftBoundaryMoments(dateStr, shift) {
   return { start, end };
 }
 
+// Build a moment from a date string (YYYY-MM-DD) and a time string (HH:mm)
+function atDateTime(dateStr, timeStr) {
+  return moment(`${dateStr} ${timeStr}`, "YYYY-MM-DD HH:mm");
+}
+
+// Duration between two HH:mm times on a given date; if out < in, roll out +1 day (overnight)
+function durationMinutesOnDate(dateStr, inTime, outTime) {
+  if (!inTime || !outTime) return null;
+  const inM = atDateTime(dateStr, inTime);
+  let outM = atDateTime(dateStr, outTime);
+  if (outM.isBefore(inM)) outM.add(1, "day");
+  const diff = outM.diff(inM, "minutes");
+  return diff >= 0 ? diff : 0;
+}
+
 /**
  * Helper: choose shift based on current time or fallback
  */
@@ -54,19 +69,17 @@ export const punchIn = async (req, res) => {
         .json({ message: "Already punched in, please punch out first" });
     }
 
-    // Compute late minutes against scheduled start for today
+    // Compute late minutes against scheduled start for today (all anchored to today)
     const { start: scheduledStart } = getShiftBoundaryMoments(today, shift);
     const lateMinutes = Math.max(0, timeNow.diff(scheduledStart, "minutes"));
     const lateMark = lateMinutes >= LATE_THRESHOLD_MIN;
 
-    // Keep existing 'late' field for compatibility; expose minutes for client
     attendance.punches.push({
       inTime: timeNow.format("HH:mm"),
       inPhotoUrl: file.path,
-      late: lateMark,
-      // exposed computed fields (included in response)
-      lateMinutes,
-      lateMark,
+      late: lateMark,           // existing boolean for compatibility
+      lateMinutes,              // expose computed minutes
+      lateMark,                 // explicit flag for UI clarity
     });
 
     await attendance.save();
@@ -108,20 +121,16 @@ export const punchOut = async (req, res) => {
     lastPunch.outTime = timeNow.format("HH:mm");
     lastPunch.outPhotoUrl = file.path;
 
-    // Calculate duration in minutes
-    const inMoment = moment(lastPunch.inTime, "HH:mm");
-    const outMoment = moment(lastPunch.outTime, "HH:mm");
-    let duration = outMoment.diff(inMoment, "minutes");
-    if (duration < 0) duration = 0; // avoid negatives
-    lastPunch.durationInMinutes = duration;
+    // Calculate duration anchored to today's date; handle overnight
+    const duration = durationMinutesOnDate(today, lastPunch.inTime, lastPunch.outTime);
+    lastPunch.durationInMinutes = duration ?? 0;
 
-    // Compute overtime minutes against scheduled end for today (handle overnight)
+    // Compute overtime minutes against scheduled end for today (anchored; handle overnight)
     const { end: scheduledEnd } = getShiftBoundaryMoments(today, shift);
     const overtimeMinutes = Math.max(0, timeNow.diff(scheduledEnd, "minutes"));
     const overtimeMark = overtimeMinutes > OVERTIME_THRESHOLD_MIN;
 
-    // Keep existing 'overtime' field for compatibility; expose minutes for client
-    lastPunch.overtime = overtimeMark;
+    lastPunch.overtime = overtimeMark; // existing boolean
     lastPunch.overtimeMinutes = overtimeMinutes;
     lastPunch.overtimeMark = overtimeMark;
 
@@ -133,9 +142,7 @@ export const punchOut = async (req, res) => {
   }
 };
 
-// GET per-user: include total late/OT minutes and hours per day
-// - Count late minutes only if lateMinutes > 15 (first punch)
-// - Count overtime minutes only if overtimeMinutes > 30 (all punches)
+// GET per-user: include total late/OT with date-anchored calculations
 export const getAttendance = async (req, res) => {
   const userId = req.params.userId || req.user.id;
   try {
@@ -155,39 +162,25 @@ export const getAttendance = async (req, res) => {
         : { start: null, end: null };
 
       att.punches.forEach((p, idx) => {
-        // Worked minutes
-        if (p.durationInMinutes != null) {
-          totalMin += Math.max(0, p.durationInMinutes);
-        } else if (p.inTime && p.outTime) {
-          const inM = moment(p.inTime, "HH:mm");
-          const outM = moment(p.outTime, "HH:mm");
-          const diff = outM.diff(inM, "minutes");
-          totalMin += diff > 0 ? diff : 0;
-        }
+        // Worked minutes: anchor to attendance date; handle overnight
+        const d = p.durationInMinutes != null
+          ? Math.max(0, p.durationInMinutes)
+          : durationMinutesOnDate(att.date, p.inTime, p.outTime);
+        if (d != null) totalMin += d;
 
-        // Late minutes (first punch only) — add only if strictly > threshold
+        // Late (first punch only): compute on attendance date; include only if > 15
         if (idx === 0) {
-          const computedLate =
-            p.lateMinutes != null
-              ? p.lateMinutes
-              : sStart && p.inTime
-              ? Math.max(0, moment(p.inTime, "HH:mm").diff(sStart, "minutes"))
-              : 0;
-          if (computedLate > LATE_THRESHOLD_MIN) {
-            lateMin += computedLate;
-          }
+          const computedLate = p.lateMinutes != null
+            ? p.lateMinutes
+            : (sStart && p.inTime ? Math.max(0, atDateTime(att.date, p.inTime).diff(sStart, "minutes")) : 0);
+          if (computedLate > LATE_THRESHOLD_MIN) lateMin += computedLate;
         }
 
-        // Overtime minutes (all punches) — add only if strictly > threshold
-        const computedOT =
-          p.overtimeMinutes != null
-            ? p.overtimeMinutes
-            : sEnd && p.outTime
-            ? Math.max(0, moment(p.outTime, "HH:mm").diff(sEnd, "minutes"))
-            : 0;
-        if (computedOT > OVERTIME_THRESHOLD_MIN) {
-          overtimeMin += computedOT;
-        }
+        // Overtime (all punches): compute on attendance date; include only if > 30
+        const computedOT = p.overtimeMinutes != null
+          ? p.overtimeMinutes
+          : (sEnd && p.outTime ? Math.max(0, atDateTime(att.date, p.outTime).diff(sEnd, "minutes")) : 0);
+        if (computedOT > OVERTIME_THRESHOLD_MIN) overtimeMin += computedOT;
       });
 
       return {
@@ -210,7 +203,6 @@ export const getAttendance = async (req, res) => {
 
 /**
  * Admin: get attendance records for a given date (or today)
- * - Count late only if >15 on first punch; OT only if >30 on each punch
  */
 export const getAttendanceByDate = async (req, res) => {
   try {
@@ -232,35 +224,27 @@ export const getAttendanceByDate = async (req, res) => {
 
       // Enhance punches with calculated duration and late/OT minutes
       const enhancedPunches = att.punches.map((punch, idx) => {
-        // duration
+        // duration anchored to att.date
         let duration = punch.durationInMinutes;
-        if (duration == null && punch.inTime && punch.outTime) {
-          const inM = moment(punch.inTime, "HH:mm");
-          const outM = moment(punch.outTime, "HH:mm");
-          duration = outM.diff(inM, "minutes");
-          if (duration < 0) duration = 0;
+        if (duration == null) {
+          const d = durationMinutesOnDate(att.date, punch.inTime, punch.outTime);
+          duration = d != null ? d : 0;
         }
-        if (duration != null) totalMin += duration;
+        totalMin += duration;
 
-        // late minutes (first punch only) — include only if > threshold
-        let lateMinutes =
-          punch.lateMinutes != null
-            ? punch.lateMinutes
-            : sStart && punch.inTime
-            ? Math.max(0, moment(punch.inTime, "HH:mm").diff(sStart, "minutes"))
-            : 0;
+        // late (first punch only) — compute on att.date; include only if > 15
+        let lateMinutes = punch.lateMinutes != null
+          ? punch.lateMinutes
+          : (sStart && punch.inTime ? Math.max(0, atDateTime(att.date, punch.inTime).diff(sStart, "minutes")) : 0);
         const lateMark = lateMinutes >= LATE_THRESHOLD_MIN;
         if (idx === 0 && lateMinutes > LATE_THRESHOLD_MIN) {
           lateMin += lateMinutes;
         }
 
-        // overtime minutes (each punch) — include only if > threshold
-        let overtimeMinutes =
-          punch.overtimeMinutes != null
-            ? punch.overtimeMinutes
-            : sEnd && punch.outTime
-            ? Math.max(0, moment(punch.outTime, "HH:mm").diff(sEnd, "minutes"))
-            : 0;
+        // overtime (each punch) — compute on att.date; include only if > 30
+        let overtimeMinutes = punch.overtimeMinutes != null
+          ? punch.overtimeMinutes
+          : (sEnd && punch.outTime ? Math.max(0, atDateTime(att.date, punch.outTime).diff(sEnd, "minutes")) : 0);
         const overtimeMark = overtimeMinutes > OVERTIME_THRESHOLD_MIN;
         if (overtimeMinutes > OVERTIME_THRESHOLD_MIN) {
           overtimeMin += overtimeMinutes;
@@ -268,7 +252,7 @@ export const getAttendanceByDate = async (req, res) => {
 
         return {
           ...punch.toObject(),
-          durationInMinutes: duration ?? 0,
+          durationInMinutes: duration,
           // expose computed flags + minutes in API response
           lateMark,
           lateMinutes,
@@ -385,39 +369,25 @@ export const getAttendanceByMonth = async (req, res) => {
         : { start: null, end: null };
 
       att.punches.forEach((p, idx) => {
-        // worked minutes
-        if (p.durationInMinutes != null) {
-          dayMin += Math.max(0, p.durationInMinutes);
-        } else if (p.inTime && p.outTime) {
-          const inM = moment(p.inTime, "HH:mm");
-          const outM = moment(p.outTime, "HH:mm");
-          const diff = outM.diff(inM, "minutes");
-          dayMin += diff > 0 ? diff : 0;
-        }
+        // worked minutes anchored to att.date
+        const d = p.durationInMinutes != null
+          ? Math.max(0, p.durationInMinutes)
+          : durationMinutesOnDate(att.date, p.inTime, p.outTime);
+        if (d != null) dayMin += d;
 
         // late (first punch) — include only if > 15
         if (idx === 0) {
-          const lm =
-            p.lateMinutes != null
-              ? p.lateMinutes
-              : sStart && p.inTime
-              ? Math.max(0, moment(p.inTime, "HH:mm").diff(sStart, "minutes"))
-              : 0;
-          if (lm > LATE_THRESHOLD_MIN) {
-            dayLate += lm;
-          }
+          const lm = p.lateMinutes != null
+            ? p.lateMinutes
+            : (sStart && p.inTime ? Math.max(0, atDateTime(att.date, p.inTime).diff(sStart, "minutes")) : 0);
+          if (lm > LATE_THRESHOLD_MIN) dayLate += lm;
         }
 
         // overtime (sum across punches) — include only if > 30
-        const om =
-          p.overtimeMinutes != null
-            ? p.overtimeMinutes
-            : sEnd && p.outTime
-            ? Math.max(0, moment(p.outTime, "HH:mm").diff(sEnd, "minutes"))
-            : 0;
-        if (om > OVERTIME_THRESHOLD_MIN) {
-          dayOT += om;
-        }
+        const om = p.overtimeMinutes != null
+          ? p.overtimeMinutes
+          : (sEnd && p.outTime ? Math.max(0, atDateTime(att.date, p.outTime).diff(sEnd, "minutes")) : 0);
+        if (om > OVERTIME_THRESHOLD_MIN) dayOT += om;
       });
 
       totalMinAll += dayMin;
