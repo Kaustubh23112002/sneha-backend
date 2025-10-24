@@ -8,23 +8,38 @@ export const login = async (req, res) => {
   try {
     const user = await User.findOne({ email });
     if (!user) {
-       console.log("❌ User not found with email:", email);
-      return res.status(404).json({ message: "User not found" });}
+      console.log("❌ User not found with email:", email);
+      return res.status(404).json({ message: "User not found" });
+    }
 
-      console.log("✅ User found:", user.email);
+    console.log("✅ User found:", user.email);
     // console.log("Stored hashed password:", user.password);
 
     const isMatch = await user.comparePassword(password);
-     console.log("🔍 Password match result:", isMatch);
+    console.log("🔍 Password match result:", isMatch);
     if (!isMatch) {
       console.log("❌ Password did not match");
-      return res.status(400).json({ message: "Wrong credentials" });}
+      return res.status(400).json({ message: "Wrong credentials" });
+    }
 
-    const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: "1d" });
+    const token = jwt.sign(
+      { id: user._id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" }
+    );
     res
-      .cookie("token", token, { httpOnly: true, secure: true, sameSite: "None", maxAge: 24 * 60 * 60 * 1000, })
+      .cookie("token", token, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 24 * 60 * 60 * 1000,
+      })
       .status(200)
-      .json({ message: "Login successful", user: { id: user._id, fullName: user.fullName, role: user.role } });
+      .json({
+        message: "Login successful",
+        token, // ✅ add this
+        user: { id: user._id, fullName: user.fullName, role: user.role },
+      });
   } catch (err) {
     console.error("login error:", err);
     res.status(500).json({ message: "Server error" });
@@ -32,7 +47,15 @@ export const login = async (req, res) => {
 };
 
 export const createEmployee = async (req, res) => {
-  const { fullName, email, password, phoneNumber, address, salary, shiftTimings } = req.body;
+  const {
+    fullName,
+    email,
+    password,
+    phoneNumber,
+    address,
+    salary,
+    shiftTimings,
+  } = req.body;
   try {
     const exist = await User.findOne({ $or: [{ email }, { phoneNumber }] });
     if (exist) {
@@ -47,7 +70,7 @@ export const createEmployee = async (req, res) => {
       address,
       salary,
       shiftTimings,
-      role: "employee"
+      role: "employee",
     });
 
     await newUser.save();
