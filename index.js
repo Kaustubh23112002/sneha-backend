@@ -58,13 +58,24 @@ app.use("/api/admin-attendance", adminAttendanceRoutes);
 app.use("/api/employees", employeeRoutes);
 
 // Error handler
+// Global error handler (place after routes)
 app.use((err, req, res, next) => {
   console.error("Global error:", err);
+
+  // If headers already sent, let Express handle it
+  if (res.headersSent) {
+    return next(err); // do not send another response
+  }
+
+  // CORS-specific info
   if (String(err.message || "").startsWith("CORS origin blocked")) {
     return res.status(403).json({ message: err.message });
   }
-  res.status(500).json({ message: "Internal server error" });
+
+  const status = err.status || 500;
+  return res.status(status).json({ message: err.message || "Internal server error" });
 });
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
