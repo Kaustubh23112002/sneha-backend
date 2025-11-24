@@ -134,7 +134,7 @@ export const punchOut = async (req, res) => {
   }
 };
 
-// GET per-user: totalMinutes excludes overtime > 30
+// GET per-user: totalMinutes excludes overtime > 30 (always recompute from in/out)
 export const getAttendance = async (req, res) => {
   const userId = req.params.userId || req.user.id;
   try {
@@ -154,29 +154,30 @@ export const getAttendance = async (req, res) => {
         : { start: null, end: null };
 
       att.punches.forEach((p, idx) => {
-        // Raw duration
-        const d = p.durationInMinutes != null
-          ? Math.max(0, p.durationInMinutes)
-          : durationMinutesOnDate(att.date, p.inTime, p.outTime);
+        // Always recompute duration from in/out when both exist
+        const d =
+          p.inTime && p.outTime
+            ? durationMinutesOnDate(att.date, p.inTime, p.outTime)
+            : p.durationInMinutes ?? 0;
 
-        // Overtime minutes for this punch
-        const computedOT = p.overtimeMinutes != null
-          ? p.overtimeMinutes
-          : (sEnd && p.outTime ? Math.max(0, atDateTime(att.date, p.outTime).diff(sEnd, "minutes")) : 0);
-
-        // Only count overtime minutes if > 30
+        // Recompute OT against shift end
+        const computedOT =
+          p.outTime && sEnd
+            ? Math.max(0, atDateTime(att.date, p.outTime).diff(sEnd, "minutes"))
+            : 0;
         const countedOT = computedOT > OVERTIME_THRESHOLD_MIN ? computedOT : 0;
         overtimeMin += countedOT;
 
-        // Subtract overtime from worked hours
-        const workedMinutes = d != null ? Math.max(0, d - countedOT) : 0;
+        // Worked = duration - OT (early work before shift counts as regular)
+        const workedMinutes = Math.max(0, (d ?? 0) - countedOT);
         totalMin += workedMinutes;
 
-        // Late (first punch only)
+        // Late only for first punch
         if (idx === 0) {
-          const computedLate = p.lateMinutes != null
-            ? p.lateMinutes
-            : (sStart && p.inTime ? Math.max(0, atDateTime(att.date, p.inTime).diff(sStart, "minutes")) : 0);
+          const computedLate =
+            p.inTime && sStart
+              ? Math.max(0, atDateTime(att.date, p.inTime).diff(sStart, "minutes"))
+              : 0;
           if (computedLate > LATE_THRESHOLD_MIN) lateMin += computedLate;
         }
       });
@@ -199,7 +200,7 @@ export const getAttendance = async (req, res) => {
   }
 };
 
-// Admin: get attendance by date; totalMinutes excludes overtime > 30
+// Admin: get attendance by date; totalMinutes excludes overtime > 30 (always recompute)
 export const getAttendanceByDate = async (req, res) => {
   try {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
@@ -219,33 +220,33 @@ export const getAttendanceByDate = async (req, res) => {
         : { start: null, end: null };
 
       const enhancedPunches = att.punches.map((punch, idx) => {
-        // Raw duration
-        let duration = punch.durationInMinutes;
-        if (duration == null) {
-          const d = durationMinutesOnDate(att.date, punch.inTime, punch.outTime);
-          duration = d != null ? d : 0;
-        }
+        // Always recompute duration from in/out
+        const duration =
+          punch.inTime && punch.outTime
+            ? durationMinutesOnDate(att.date, punch.inTime, punch.outTime)
+            : punch.durationInMinutes ?? 0;
 
-        // Late minutes
-        let lateMinutes = punch.lateMinutes != null
-          ? punch.lateMinutes
-          : (sStart && punch.inTime ? Math.max(0, atDateTime(att.date, punch.inTime).diff(sStart, "minutes")) : 0);
+        // Late (first punch only)
+        const lateMinutes =
+          punch.inTime && sStart
+            ? Math.max(0, atDateTime(att.date, punch.inTime).diff(sStart, "minutes"))
+            : 0;
         const lateMark = lateMinutes >= LATE_THRESHOLD_MIN;
         if (idx === 0 && lateMinutes > LATE_THRESHOLD_MIN) {
           lateMin += lateMinutes;
         }
 
-        // Overtime minutes
-        let overtimeMinutes = punch.overtimeMinutes != null
-          ? punch.overtimeMinutes
-          : (sEnd && punch.outTime ? Math.max(0, atDateTime(att.date, punch.outTime).diff(sEnd, "minutes")) : 0);
+        // Overtime (always recompute)
+        const overtimeMinutes =
+          punch.outTime && sEnd
+            ? Math.max(0, atDateTime(att.date, punch.outTime).diff(sEnd, "minutes"))
+            : 0;
         const overtimeMark = overtimeMinutes > OVERTIME_THRESHOLD_MIN;
-
-        const countedOT = overtimeMinutes > OVERTIME_THRESHOLD_MIN ? overtimeMinutes : 0;
+        const countedOT = overtimeMark ? overtimeMinutes : 0;
         if (countedOT > 0) overtimeMin += countedOT;
 
-        // Subtract overtime from worked minutes
-        const workedMinutes = Math.max(0, duration - countedOT);
+        // Worked = duration - counted OT
+        const workedMinutes = Math.max(0, (duration ?? 0) - countedOT);
         totalMin += workedMinutes;
 
         return {
@@ -277,7 +278,7 @@ export const getAttendanceByDate = async (req, res) => {
   }
 };
 
-// Admin: employee history (no totals, just raw records)
+// Admin: employee history (raw)
 export const getEmployeeHistory = async (req, res) => {
   try {
     const { userId } = req.params;
@@ -292,13 +293,17 @@ export const getEmployeeHistory = async (req, res) => {
   }
 };
 
-// Admin: edit punch times
+// Admin: edit punch times (recompute derived fields on write)
 export const editPunchTimes = async (req, res) => {
   try {
     const { attendanceId } = req.params;
     const { punchIndex, inTime, outTime } = req.body;
 
-    const attendance = await Attendance.findById(attendanceId);
+    // Need user + shift to recompute late/OT
+    const attendance = await Attendance.findById(attendanceId).populate(
+      "user",
+      "shiftTimings"
+    );
     if (!attendance) {
       return res.status(404).json({ message: "Attendance record not found" });
     }
@@ -311,6 +316,34 @@ export const editPunchTimes = async (req, res) => {
     if (inTime !== undefined && inTime !== "") punch.inTime = inTime;
     if (outTime !== undefined && outTime !== "") punch.outTime = outTime;
 
+    const shift = attendance.user?.shiftTimings?.[0] || null;
+    if (shift) {
+      const { start: sStart, end: sEnd } = getShiftBoundaryMoments(attendance.date, shift);
+
+      // recompute duration
+      const d =
+        punch.inTime && punch.outTime
+          ? durationMinutesOnDate(attendance.date, punch.inTime, punch.outTime)
+          : null;
+      if (d != null) punch.durationInMinutes = d;
+
+      // recompute late (only meaningful for first punch)
+      if (punchIndex === 0 && punch.inTime) {
+        const lm = Math.max(0, atDateTime(attendance.date, punch.inTime).diff(sStart, "minutes"));
+        punch.lateMinutes = lm;
+        punch.late = lm >= LATE_THRESHOLD_MIN;
+        punch.lateMark = punch.late;
+      }
+
+      // recompute overtime
+      if (punch.outTime) {
+        const om = Math.max(0, atDateTime(attendance.date, punch.outTime).diff(sEnd, "minutes"));
+        punch.overtimeMinutes = om;
+        punch.overtime = om > OVERTIME_THRESHOLD_MIN;
+        punch.overtimeMark = punch.overtime;
+      }
+    }
+
     await attendance.save();
     return res.status(200).json({ message: "Punch updated", attendance });
   } catch (err) {
@@ -319,7 +352,7 @@ export const editPunchTimes = async (req, res) => {
   }
 };
 
-// Monthly: day totals and summary exclude overtime > 30 from worked minutes
+// Monthly: day totals and summary exclude overtime > 30 (always recompute)
 export const getAttendanceByMonth = async (req, res) => {
   try {
     const { userId } = req.params;
@@ -334,10 +367,7 @@ export const getAttendanceByMonth = async (req, res) => {
       date: { $regex: `^${month}` },
     })
       .sort({ date: 1 })
-      .populate(
-        "user",
-        "fullName email phoneNumber address salary shiftTimings"
-      );
+      .populate("user", "fullName email phoneNumber address salary shiftTimings");
 
     if (!records.length) {
       return res.status(404).json({ message: "No attendance records found" });
@@ -360,28 +390,30 @@ export const getAttendanceByMonth = async (req, res) => {
         : { start: null, end: null };
 
       att.punches.forEach((p, idx) => {
-        // Raw duration
-        const d = p.durationInMinutes != null
-          ? Math.max(0, p.durationInMinutes)
-          : durationMinutesOnDate(att.date, p.inTime, p.outTime);
+        // recompute duration
+        const d =
+          p.inTime && p.outTime
+            ? durationMinutesOnDate(att.date, p.inTime, p.outTime)
+            : p.durationInMinutes ?? 0;
 
-        // Overtime
-        const om = p.overtimeMinutes != null
-          ? p.overtimeMinutes
-          : (sEnd && p.outTime ? Math.max(0, atDateTime(att.date, p.outTime).diff(sEnd, "minutes")) : 0);
-
+        // recompute overtime
+        const om =
+          p.outTime && sEnd
+            ? Math.max(0, atDateTime(att.date, p.outTime).diff(sEnd, "minutes"))
+            : 0;
         const countedOT = om > OVERTIME_THRESHOLD_MIN ? om : 0;
         if (countedOT > 0) dayOT += countedOT;
 
-        // Subtract overtime from worked minutes
-        const workedMinutes = d != null ? Math.max(0, d - countedOT) : 0;
+        // worked after subtracting OT
+        const workedMinutes = Math.max(0, (d ?? 0) - countedOT);
         dayMin += workedMinutes;
 
-        // Late (first punch)
+        // late (first punch)
         if (idx === 0) {
-          const lm = p.lateMinutes != null
-            ? p.lateMinutes
-            : (sStart && p.inTime ? Math.max(0, atDateTime(att.date, p.inTime).diff(sStart, "minutes")) : 0);
+          const lm =
+            p.inTime && sStart
+              ? Math.max(0, atDateTime(att.date, p.inTime).diff(sStart, "minutes"))
+              : 0;
           if (lm > LATE_THRESHOLD_MIN) dayLate += lm;
         }
       });
