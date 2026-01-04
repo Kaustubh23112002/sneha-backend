@@ -5,7 +5,6 @@ import moment from "moment";
 
 // Thresholds
 const LATE_THRESHOLD_MIN = 15;
-const OVERTIME_THRESHOLD_MIN = 30;
 
 // Build shift start/end with date and handle overnight end < start
 function getShiftBoundaryMoments(dateStr, shift) {
@@ -30,14 +29,21 @@ function durationMinutesOnDate(dateStr, inTime, outTime) {
   return diff >= 0 ? diff : 0;
 }
 
-/**
- * Helper: choose shift based on current time or fallback
- */
+// Calculate scheduled shift duration
+function getScheduledShiftMinutes(shift) {
+  if (!shift || !shift.start || !shift.end) return 0;
+  const start = moment(shift.start, "HH:mm");
+  let end = moment(shift.end, "HH:mm");
+  if (end.isBefore(start)) end.add(1, "day");
+  return end.diff(start, "minutes");
+}
+
+// Helper: choose shift
 function getMatchingShift(user, timeNow) {
   return user.shiftTimings?.[0] || null;
 }
 
-// PUNCH IN with late computation (mark at >=15; sum only if >15)
+// PUNCH IN with late computation (mark at >=15)
 export const punchIn = async (req, res) => {
   const userId = req.user.id;
   const file = req.file;
@@ -85,7 +91,7 @@ export const punchIn = async (req, res) => {
   }
 };
 
-// PUNCH OUT with overtime computation (mark and sum only when >30)
+// PUNCH OUT (no overtime, cap at shift duration)
 export const punchOut = async (req, res) => {
   const userId = req.user.id;
   const file = req.file;
@@ -118,14 +124,6 @@ export const punchOut = async (req, res) => {
     const duration = durationMinutesOnDate(today, lastPunch.inTime, lastPunch.outTime);
     lastPunch.durationInMinutes = duration ?? 0;
 
-    const { end: scheduledEnd } = getShiftBoundaryMoments(today, shift);
-    const overtimeMinutes = Math.max(0, timeNow.diff(scheduledEnd, "minutes"));
-    const overtimeMark = overtimeMinutes > OVERTIME_THRESHOLD_MIN;
-
-    lastPunch.overtime = overtimeMark;
-    lastPunch.overtimeMinutes = overtimeMinutes;
-    lastPunch.overtimeMark = overtimeMark;
-
     await attendance.save();
     return res.status(200).json({ message: "Punched out", attendance });
   } catch (err) {
@@ -134,7 +132,7 @@ export const punchOut = async (req, res) => {
   }
 };
 
-// GET per-user: totalMinutes excludes overtime > 30 (always recompute from in/out)
+// GET per-user: totalMinutes capped at shift duration, ignore early arrival
 export const getAttendance = async (req, res) => {
   const userId = req.params.userId || req.user.id;
   try {
@@ -146,30 +144,42 @@ export const getAttendance = async (req, res) => {
     const enhanced = records.map((att) => {
       let totalMin = 0;
       let lateMin = 0;
-      let overtimeMin = 0;
 
       const shift = att.user?.shiftTimings?.[0] || null;
       const { start: sStart, end: sEnd } = shift
         ? getShiftBoundaryMoments(att.date, shift)
         : { start: null, end: null };
 
+      const scheduledShiftMinutes = shift ? getScheduledShiftMinutes(shift) : 0;
+
       att.punches.forEach((p, idx) => {
-        // Always recompute duration from in/out when both exist
-        const d =
+        // Raw duration from in to out
+        const rawDuration =
           p.inTime && p.outTime
             ? durationMinutesOnDate(att.date, p.inTime, p.outTime)
             : p.durationInMinutes ?? 0;
 
-        // Recompute OT against shift end
-        const computedOT =
-          p.outTime && sEnd
-            ? Math.max(0, atDateTime(att.date, p.outTime).diff(sEnd, "minutes"))
-            : 0;
-        const countedOT = computedOT > OVERTIME_THRESHOLD_MIN ? computedOT : 0;
-        overtimeMin += countedOT;
+        // Effective start: max(inTime, shift.start) - ignore early arrival
+        const actualIn = p.inTime ? atDateTime(att.date, p.inTime) : null;
+        const effectiveStart = actualIn && sStart ? moment.max(actualIn, sStart) : actualIn;
 
-        // Worked = duration - OT (early work before shift counts as regular)
-        const workedMinutes = Math.max(0, (d ?? 0) - countedOT);
+        // Effective end: min(outTime, shift.end) - cap at shift end
+        const actualOut = p.outTime ? atDateTime(att.date, p.outTime) : null;
+        let effectiveEnd = actualOut && sEnd ? moment.min(actualOut, sEnd) : actualOut;
+
+        // Handle overnight effective end
+        if (effectiveEnd && effectiveStart && effectiveEnd.isBefore(effectiveStart)) {
+          effectiveEnd.add(1, "day");
+        }
+
+        // Calculate worked minutes (capped at shift duration, no early/overtime)
+        let workedMinutes = 0;
+        if (effectiveStart && effectiveEnd) {
+          workedMinutes = Math.max(0, effectiveEnd.diff(effectiveStart, "minutes"));
+          // Cap at scheduled shift duration
+          workedMinutes = Math.min(workedMinutes, scheduledShiftMinutes);
+        }
+
         totalMin += workedMinutes;
 
         // Late only for first punch
@@ -178,7 +188,7 @@ export const getAttendance = async (req, res) => {
             p.inTime && sStart
               ? Math.max(0, atDateTime(att.date, p.inTime).diff(sStart, "minutes"))
               : 0;
-          if (computedLate > LATE_THRESHOLD_MIN) lateMin += computedLate;
+          if (computedLate >= LATE_THRESHOLD_MIN) lateMin += computedLate;
         }
       });
 
@@ -187,9 +197,7 @@ export const getAttendance = async (req, res) => {
         totalMinutes: totalMin,
         totalHours: (totalMin / 60).toFixed(2),
         totalLateMinutes: lateMin,
-        totalOvertimeMinutes: overtimeMin,
         totalLateHours: (lateMin / 60).toFixed(2),
-        totalOvertimeHours: (overtimeMin / 60).toFixed(2),
       };
     });
 
@@ -200,7 +208,7 @@ export const getAttendance = async (req, res) => {
   }
 };
 
-// Admin: get attendance by date; totalMinutes excludes overtime > 30 (always recompute)
+// Admin: get attendance by date; totalMinutes capped, no early/overtime
 export const getAttendanceByDate = async (req, res) => {
   try {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
@@ -212,15 +220,16 @@ export const getAttendanceByDate = async (req, res) => {
     const enhanced = records.map((att) => {
       let totalMin = 0;
       let lateMin = 0;
-      let overtimeMin = 0;
 
       const shift = att.user?.shiftTimings?.[0] || null;
       const { start: sStart, end: sEnd } = shift
         ? getShiftBoundaryMoments(att.date, shift)
         : { start: null, end: null };
 
+      const scheduledShiftMinutes = shift ? getScheduledShiftMinutes(shift) : 0;
+
       const enhancedPunches = att.punches.map((punch, idx) => {
-        // Always recompute duration from in/out
+        // Raw duration
         const duration =
           punch.inTime && punch.outTime
             ? durationMinutesOnDate(att.date, punch.inTime, punch.outTime)
@@ -232,21 +241,30 @@ export const getAttendanceByDate = async (req, res) => {
             ? Math.max(0, atDateTime(att.date, punch.inTime).diff(sStart, "minutes"))
             : 0;
         const lateMark = lateMinutes >= LATE_THRESHOLD_MIN;
-        if (idx === 0 && lateMinutes > LATE_THRESHOLD_MIN) {
+        if (idx === 0 && lateMinutes >= LATE_THRESHOLD_MIN) {
           lateMin += lateMinutes;
         }
 
-        // Overtime (always recompute)
-        const overtimeMinutes =
-          punch.outTime && sEnd
-            ? Math.max(0, atDateTime(att.date, punch.outTime).diff(sEnd, "minutes"))
-            : 0;
-        const overtimeMark = overtimeMinutes > OVERTIME_THRESHOLD_MIN;
-        const countedOT = overtimeMark ? overtimeMinutes : 0;
-        if (countedOT > 0) overtimeMin += countedOT;
+        // Effective start: max(inTime, shift.start)
+        const actualIn = punch.inTime ? atDateTime(att.date, punch.inTime) : null;
+        const effectiveStart = actualIn && sStart ? moment.max(actualIn, sStart) : actualIn;
 
-        // Worked = duration - counted OT
-        const workedMinutes = Math.max(0, (duration ?? 0) - countedOT);
+        // Effective end: min(outTime, shift.end)
+        const actualOut = punch.outTime ? atDateTime(att.date, punch.outTime) : null;
+        let effectiveEnd = actualOut && sEnd ? moment.min(actualOut, sEnd) : actualOut;
+
+        // Handle overnight
+        if (effectiveEnd && effectiveStart && effectiveEnd.isBefore(effectiveStart)) {
+          effectiveEnd.add(1, "day");
+        }
+
+        // Calculate worked (capped)
+        let workedMinutes = 0;
+        if (effectiveStart && effectiveEnd) {
+          workedMinutes = Math.max(0, effectiveEnd.diff(effectiveStart, "minutes"));
+          workedMinutes = Math.min(workedMinutes, scheduledShiftMinutes);
+        }
+
         totalMin += workedMinutes;
 
         return {
@@ -254,8 +272,6 @@ export const getAttendanceByDate = async (req, res) => {
           durationInMinutes: duration,
           lateMark,
           lateMinutes,
-          overtimeMark,
-          overtimeMinutes,
         };
       });
 
@@ -265,9 +281,7 @@ export const getAttendanceByDate = async (req, res) => {
         totalMinutes: totalMin,
         totalHours: (totalMin / 60).toFixed(2),
         totalLateMinutes: lateMin,
-        totalOvertimeMinutes: overtimeMin,
         totalLateHours: (lateMin / 60).toFixed(2),
-        totalOvertimeHours: (overtimeMin / 60).toFixed(2),
       };
     });
 
@@ -299,7 +313,6 @@ export const editPunchTimes = async (req, res) => {
     const { attendanceId } = req.params;
     const { punchIndex, inTime, outTime } = req.body;
 
-    // Need user + shift to recompute late/OT
     const attendance = await Attendance.findById(attendanceId).populate(
       "user",
       "shiftTimings"
@@ -318,7 +331,7 @@ export const editPunchTimes = async (req, res) => {
 
     const shift = attendance.user?.shiftTimings?.[0] || null;
     if (shift) {
-      const { start: sStart, end: sEnd } = getShiftBoundaryMoments(attendance.date, shift);
+      const { start: sStart } = getShiftBoundaryMoments(attendance.date, shift);
 
       // recompute duration
       const d =
@@ -334,14 +347,6 @@ export const editPunchTimes = async (req, res) => {
         punch.late = lm >= LATE_THRESHOLD_MIN;
         punch.lateMark = punch.late;
       }
-
-      // recompute overtime
-      if (punch.outTime) {
-        const om = Math.max(0, atDateTime(attendance.date, punch.outTime).diff(sEnd, "minutes"));
-        punch.overtimeMinutes = om;
-        punch.overtime = om > OVERTIME_THRESHOLD_MIN;
-        punch.overtimeMark = punch.overtime;
-      }
     }
 
     await attendance.save();
@@ -352,7 +357,7 @@ export const editPunchTimes = async (req, res) => {
   }
 };
 
-// Monthly: day totals and summary exclude overtime > 30 (always recompute)
+// Monthly: day totals capped at shift duration, late marks tracked for half-day deduction
 export const getAttendanceByMonth = async (req, res) => {
   try {
     const { userId } = req.params;
@@ -374,62 +379,86 @@ export const getAttendanceByMonth = async (req, res) => {
     }
 
     const user = records[0].user;
+    const shift = user?.shiftTimings?.[0] || null;
+    const scheduledShiftMinutes = shift ? getScheduledShiftMinutes(shift) : 0;
 
     let totalMinAll = 0;
     let totalLateAll = 0;
-    let totalOvertimeAll = 0;
+    let lateMarkCount = 0; // Count late marks for half-day calculation
+    let halfDayDeductions = 0; // Number of half days deducted
 
     const enhanced = records.map((att) => {
       let dayMin = 0;
       let dayLate = 0;
-      let dayOT = 0;
+      let dayHasLateMark = false;
 
-      const shift = att.user?.shiftTimings?.[0] || null;
       const { start: sStart, end: sEnd } = shift
         ? getShiftBoundaryMoments(att.date, shift)
         : { start: null, end: null };
 
       att.punches.forEach((p, idx) => {
-        // recompute duration
+        // Raw duration
         const d =
           p.inTime && p.outTime
             ? durationMinutesOnDate(att.date, p.inTime, p.outTime)
             : p.durationInMinutes ?? 0;
 
-        // recompute overtime
-        const om =
-          p.outTime && sEnd
-            ? Math.max(0, atDateTime(att.date, p.outTime).diff(sEnd, "minutes"))
-            : 0;
-        const countedOT = om > OVERTIME_THRESHOLD_MIN ? om : 0;
-        if (countedOT > 0) dayOT += countedOT;
+        // Effective start: max(inTime, shift.start)
+        const actualIn = p.inTime ? atDateTime(att.date, p.inTime) : null;
+        const effectiveStart = actualIn && sStart ? moment.max(actualIn, sStart) : actualIn;
 
-        // worked after subtracting OT
-        const workedMinutes = Math.max(0, (d ?? 0) - countedOT);
+        // Effective end: min(outTime, shift.end)
+        const actualOut = p.outTime ? atDateTime(att.date, p.outTime) : null;
+        let effectiveEnd = actualOut && sEnd ? moment.min(actualOut, sEnd) : actualOut;
+
+        // Handle overnight
+        if (effectiveEnd && effectiveStart && effectiveEnd.isBefore(effectiveStart)) {
+          effectiveEnd.add(1, "day");
+        }
+
+        // Calculate worked (capped)
+        let workedMinutes = 0;
+        if (effectiveStart && effectiveEnd) {
+          workedMinutes = Math.max(0, effectiveEnd.diff(effectiveStart, "minutes"));
+          workedMinutes = Math.min(workedMinutes, scheduledShiftMinutes);
+        }
+
         dayMin += workedMinutes;
 
-        // late (first punch)
+        // Late (first punch)
         if (idx === 0) {
           const lm =
             p.inTime && sStart
               ? Math.max(0, atDateTime(att.date, p.inTime).diff(sStart, "minutes"))
               : 0;
-          if (lm > LATE_THRESHOLD_MIN) dayLate += lm;
+          if (lm >= LATE_THRESHOLD_MIN) {
+            dayLate += lm;
+            dayHasLateMark = true;
+          }
         }
       });
 
+      // Track late marks for half-day deduction
+      if (dayHasLateMark) {
+        lateMarkCount++;
+        // Every 3rd late mark = half day deduction
+        if (lateMarkCount % 3 === 0) {
+          halfDayDeductions++;
+          // Deduct half the scheduled shift
+          dayMin = Math.max(0, dayMin - (scheduledShiftMinutes / 2));
+        }
+      }
+
       totalMinAll += dayMin;
       totalLateAll += dayLate;
-      totalOvertimeAll += dayOT;
 
       return {
         ...att.toObject(),
         dayMinutes: dayMin,
         dayHours: (dayMin / 60).toFixed(2),
         totalLateMinutes: dayLate,
-        totalOvertimeMinutes: dayOT,
         totalLateHours: (dayLate / 60).toFixed(2),
-        totalOvertimeHours: (dayOT / 60).toFixed(2),
+        isHalfDayDeducted: dayHasLateMark && lateMarkCount % 3 === 0,
       };
     });
 
@@ -442,9 +471,9 @@ export const getAttendanceByMonth = async (req, res) => {
         totalMinutes: totalMinAll,
         totalHours: (totalMinAll / 60).toFixed(2),
         totalLateMinutes: totalLateAll,
-        totalOvertimeMinutes: totalOvertimeAll,
         totalLateHours: (totalLateAll / 60).toFixed(2),
-        totalOvertimeHours: (totalOvertimeAll / 60).toFixed(2),
+        lateMarkCount,
+        halfDayDeductions,
       },
     });
   } catch (err) {
