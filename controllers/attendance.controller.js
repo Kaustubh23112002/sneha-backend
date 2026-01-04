@@ -43,7 +43,7 @@ function getMatchingShift(user, timeNow) {
   return user.shiftTimings?.[0] || null;
 }
 
-// PUNCH IN with late computation (mark at >=15)
+// PUNCH IN with late computation (mark at >=15) and monthly late mark tracking
 export const punchIn = async (req, res) => {
   const userId = req.user.id;
   const file = req.file;
@@ -55,6 +55,7 @@ export const punchIn = async (req, res) => {
 
     const timeNow = moment.utc().add(5, "hours").add(30, "minutes");
     const today = timeNow.clone().format("YYYY-MM-DD");
+    const currentMonth = timeNow.format("YYYY-MM");
 
     const shift = getMatchingShift(user, timeNow);
     if (!shift) {
@@ -75,6 +76,38 @@ export const punchIn = async (req, res) => {
     const lateMinutes = Math.max(0, timeNow.diff(scheduledStart, "minutes"));
     const lateMark = lateMinutes >= LATE_THRESHOLD_MIN;
 
+    // **Count late marks in CURRENT MONTH ONLY (auto-resets each month)**
+    let currentMonthLateMarks = 0;
+    if (lateMark) {
+      const monthStart = moment(currentMonth, "YYYY-MM").startOf("month").format("YYYY-MM-DD");
+      const monthEnd = moment(currentMonth, "YYYY-MM").endOf("month").format("YYYY-MM-DD");
+
+      const monthlyLateCount = await Attendance.aggregate([
+        {
+          $match: {
+            user: user._id,
+            date: { $gte: monthStart, $lte: monthEnd },
+          },
+        },
+        {
+          $unwind: "$punches",
+        },
+        {
+          $match: {
+            "punches.lateMark": true,
+          },
+        },
+        {
+          $count: "lateMarks",
+        },
+      ]);
+
+      currentMonthLateMarks = monthlyLateCount[0]?.lateMarks || 0;
+    }
+
+    // **Determine if this late mark triggers half-day deduction**
+    const willBeHalfDay = lateMark && (currentMonthLateMarks + 1) % 3 === 0;
+
     attendance.punches.push({
       inTime: timeNow.format("HH:mm"),
       inPhotoUrl: file.path,
@@ -84,7 +117,21 @@ export const punchIn = async (req, res) => {
     });
 
     await attendance.save();
-    return res.status(200).json({ message: "Punched in", attendance });
+
+    const responseMsg = lateMark
+      ? `Punched in (Late by ${lateMinutes} minutes)${
+          willBeHalfDay ? " - Half day deduction will be applied!" : ""
+        }. This is late mark ${currentMonthLateMarks + 1} this month.`
+      : "Punched in successfully";
+
+    return res.status(200).json({
+      message: responseMsg,
+      attendance,
+      isLate: lateMark,
+      lateMinutes,
+      currentMonthLateMarks: currentMonthLateMarks + (lateMark ? 1 : 0),
+      halfDayTriggered: willBeHalfDay,
+    });
   } catch (err) {
     console.error("punchIn error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -357,7 +404,7 @@ export const editPunchTimes = async (req, res) => {
   }
 };
 
-// Monthly: day totals capped at shift duration, late marks tracked for half-day deduction
+// Monthly: day totals capped at shift duration, late marks tracked for half-day deduction (RESETS EVERY MONTH)
 export const getAttendanceByMonth = async (req, res) => {
   try {
     const { userId } = req.params;
@@ -384,8 +431,8 @@ export const getAttendanceByMonth = async (req, res) => {
 
     let totalMinAll = 0;
     let totalLateAll = 0;
-    let lateMarkCount = 0; // Count late marks for half-day calculation
-    let halfDayDeductions = 0; // Number of half days deducted
+    let lateMarkCount = 0; // **Counter resets every month automatically since we only query one month**
+    let halfDayDeductions = 0;
 
     const enhanced = records.map((att) => {
       let dayMin = 0;
@@ -438,12 +485,15 @@ export const getAttendanceByMonth = async (req, res) => {
         }
       });
 
-      // Track late marks for half-day deduction
+      // **Track late marks for THIS MONTH only (auto-resets when querying different month)**
+      let isHalfDayDeducted = false;
       if (dayHasLateMark) {
-        lateMarkCount++;
+        lateMarkCount++; // Increment only within this month's records
+        
         // Every 3rd late mark = half day deduction
         if (lateMarkCount % 3 === 0) {
           halfDayDeductions++;
+          isHalfDayDeducted = true;
           // Deduct half the scheduled shift
           dayMin = Math.max(0, dayMin - (scheduledShiftMinutes / 2));
         }
@@ -458,7 +508,7 @@ export const getAttendanceByMonth = async (req, res) => {
         dayHours: (dayMin / 60).toFixed(2),
         totalLateMinutes: dayLate,
         totalLateHours: (dayLate / 60).toFixed(2),
-        isHalfDayDeducted: dayHasLateMark && lateMarkCount % 3 === 0,
+        isHalfDayDeducted,
       };
     });
 
@@ -472,7 +522,7 @@ export const getAttendanceByMonth = async (req, res) => {
         totalHours: (totalMinAll / 60).toFixed(2),
         totalLateMinutes: totalLateAll,
         totalLateHours: (totalLateAll / 60).toFixed(2),
-        lateMarkCount,
+        lateMarkCount, // Shows count for THIS MONTH only
         halfDayDeductions,
       },
     });
