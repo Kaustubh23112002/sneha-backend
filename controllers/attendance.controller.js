@@ -259,12 +259,20 @@ export const getAttendance = async (req, res) => {
 export const getAttendanceByDate = async (req, res) => {
   try {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
-    const records = await Attendance.find({ date }).populate(
-      "user",
-      "fullName email phoneNumber address salary shiftTimings"
+
+    const employees = await User.find({ role: "employee" }).select(
+      "fullName email phoneNumber address salary shiftTimings image"
     );
 
-    const enhanced = records.map((att) => {
+    const records = await Attendance.find({ date }).populate(
+      "user",
+      "fullName email phoneNumber address salary shiftTimings image"
+    );
+
+    // 🔥 Enhance attendance records FIRST
+    const enhancedMap = {};
+
+    for (const att of records) {
       let totalMin = 0;
       let lateMin = 0;
 
@@ -273,42 +281,56 @@ export const getAttendanceByDate = async (req, res) => {
         ? getShiftBoundaryMoments(att.date, shift)
         : { start: null, end: null };
 
-      const scheduledShiftMinutes = shift ? getScheduledShiftMinutes(shift) : 0;
+      const scheduledShiftMinutes = shift
+        ? getScheduledShiftMinutes(shift)
+        : 0;
 
       const enhancedPunches = att.punches.map((punch, idx) => {
-        // Raw duration
         const duration =
           punch.inTime && punch.outTime
             ? durationMinutesOnDate(att.date, punch.inTime, punch.outTime)
             : punch.durationInMinutes ?? 0;
 
-        // Late (first punch only)
         const lateMinutes =
           punch.inTime && sStart
-            ? Math.max(0, atDateTime(att.date, punch.inTime).diff(sStart, "minutes"))
+            ? Math.max(
+                0,
+                atDateTime(att.date, punch.inTime).diff(sStart, "minutes")
+              )
             : 0;
-        const lateMark = lateMinutes >= LATE_THRESHOLD_MIN;
+
         if (idx === 0 && lateMinutes >= LATE_THRESHOLD_MIN) {
           lateMin += lateMinutes;
         }
 
-        // Effective start: max(inTime, shift.start)
-        const actualIn = punch.inTime ? atDateTime(att.date, punch.inTime) : null;
-        const effectiveStart = actualIn && sStart ? moment.max(actualIn, sStart) : actualIn;
+        const actualIn = punch.inTime
+          ? atDateTime(att.date, punch.inTime)
+          : null;
 
-        // Effective end: min(outTime, shift.end)
-        const actualOut = punch.outTime ? atDateTime(att.date, punch.outTime) : null;
-        let effectiveEnd = actualOut && sEnd ? moment.min(actualOut, sEnd) : actualOut;
+        const effectiveStart =
+          actualIn && sStart ? moment.max(actualIn, sStart) : actualIn;
 
-        // Handle overnight
-        if (effectiveEnd && effectiveStart && effectiveEnd.isBefore(effectiveStart)) {
+        const actualOut = punch.outTime
+          ? atDateTime(att.date, punch.outTime)
+          : null;
+
+        let effectiveEnd =
+          actualOut && sEnd ? moment.min(actualOut, sEnd) : actualOut;
+
+        if (
+          effectiveEnd &&
+          effectiveStart &&
+          effectiveEnd.isBefore(effectiveStart)
+        ) {
           effectiveEnd.add(1, "day");
         }
 
-        // Calculate worked (capped)
         let workedMinutes = 0;
         if (effectiveStart && effectiveEnd) {
-          workedMinutes = Math.max(0, effectiveEnd.diff(effectiveStart, "minutes"));
+          workedMinutes = Math.max(
+            0,
+            effectiveEnd.diff(effectiveStart, "minutes")
+          );
           workedMinutes = Math.min(workedMinutes, scheduledShiftMinutes);
         }
 
@@ -317,12 +339,12 @@ export const getAttendanceByDate = async (req, res) => {
         return {
           ...punch.toObject(),
           durationInMinutes: duration,
-          lateMark,
           lateMinutes,
+          lateMark: lateMinutes >= LATE_THRESHOLD_MIN,
         };
       });
 
-      return {
+      enhancedMap[att.user._id.toString()] = {
         ...att.toObject(),
         punches: enhancedPunches,
         totalMinutes: totalMin,
@@ -330,9 +352,31 @@ export const getAttendanceByDate = async (req, res) => {
         totalLateMinutes: lateMin,
         totalLateHours: (lateMin / 60).toFixed(2),
       };
+    }
+
+    // 🔥 Now merge employees
+    const merged = employees.map((emp) => {
+      const existing = enhancedMap[emp._id.toString()];
+
+      if (existing) return existing;
+
+      return {
+        _id: `no-att-${emp._id}`,
+        date,
+        user: emp,
+        punches: [],
+        totalMinutes: 0,
+        totalHours: "0.00",
+        totalLateMinutes: 0,
+        totalLateHours: "0.00",
+        isAbsent: true,
+      };
     });
 
-    return res.status(200).json({ date, attendance: enhanced });
+    return res.status(200).json({
+      date,
+      attendance: merged,
+    });
   } catch (err) {
     console.error("getAttendanceByDate error:", err);
     return res.status(500).json({ message: "Server error" });
