@@ -575,3 +575,65 @@ export const getAttendanceByMonth = async (req, res) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
+
+export const adminAddManualPunch = async (req, res) => {
+  try {
+    const { userId, date, inTime, outTime } = req.body;
+
+    if (!userId || !date || !inTime) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const shift = user.shiftTimings?.[0];
+    if (!shift) {
+      return res.status(400).json({ message: "No shift defined for employee" });
+    }
+
+    let attendance = await Attendance.findOne({ user: userId, date });
+
+    if (!attendance) {
+      attendance = new Attendance({
+        user: userId,
+        date,
+        punches: [],
+      });
+    }
+
+    const { start: scheduledStart } = getShiftBoundaryMoments(date, shift);
+
+    const lateMinutes = Math.max(
+      0,
+      atDateTime(date, inTime).diff(scheduledStart, "minutes")
+    );
+
+    const lateMark = lateMinutes >= LATE_THRESHOLD_MIN;
+
+    const duration =
+      inTime && outTime
+        ? durationMinutesOnDate(date, inTime, outTime)
+        : 0;
+
+    attendance.punches.push({
+      inTime,
+      outTime: outTime || null,
+      durationInMinutes: duration,
+      lateMinutes,
+      lateMark,
+      late: lateMark,
+      manualEntry: true,
+    });
+
+    await attendance.save();
+
+    return res.status(200).json({
+      message: "Manual punch added successfully",
+      attendance,
+    });
+  } catch (err) {
+    console.error("adminAddManualPunch error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};

@@ -11,6 +11,7 @@ import {
   getEmployeeHistory,
   editPunchTimes,
   getAttendanceByMonth,
+  adminAddManualPunch
 } from "../controllers/attendance.controller.js";
 
 const router = express.Router();
@@ -50,6 +51,13 @@ router.get(
   verifyToken,
   verifyAdmin,
   getAttendanceByMonth
+);
+
+router.post(
+  "/attendance/manual",
+  verifyToken,
+  verifyAdmin,
+  adminAddManualPunch
 );
 
 export default router;
